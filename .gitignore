@@ -1,0 +1,17 @@
+# 参考实现的运行产物
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本机私有：真实账本、村委授权书、密钥
+local/
+*.key
+*.pem
+*.env
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

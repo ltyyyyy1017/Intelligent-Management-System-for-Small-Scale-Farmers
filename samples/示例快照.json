@@ -1,0 +1,10 @@
+{
+  "period": "2026",
+  "event_set_hash": "22ba1020e3372d090c7dc393dabdbc148fe2fffb7234a110ddc3fc7356ef7b8b",
+  "merkle_root": "c03186abf418a5c071cdbe772ac6b013f6a1ee8f3b43c24846733a6d147a54a2",
+  "rule_version": "R1-2026.1",
+  "param_version": "2026.1",
+  "output_sha256": "f4d347c85f08d4e39ec0cda44c83b00175c38484533dca9547d5eb90e44ebf2e",
+  "signed_by": "村委-张三",
+  "signature_payload_sha256": "a53e171e00a1052f13e5cb6acdf189977bef0a4e66ba71fb79438de4c941761f"
+}
