@@ -206,6 +206,50 @@ class PermissionTest(WebTestBase):
         self.assertIn("数据分级", c.last_body)
         self.assertIn("外发记录", c.last_body)
 
+    def test_登记农机作业量(self):
+        c = self.client()
+        c.get("/admin")
+        self.assertIn("农机作业量", c.last_body)
+        c.post("/admin/machinery", {
+            "_csrf": c.csrf, "farmer_id": "1", "period": "2026", "name": "旋耕机",
+            "mu": "12", "prior": "0", "year_index": "1",
+        })
+        self.assertIn("已保存", c.last_body)
+        conn = self.env.conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM machinery_use WHERE farmer_id = 1 AND period = '2026'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["mu"], "12")
+
+
+    def test_批量导入模板与导入(self):
+        c = self.client()
+        c.get("/admin/import")
+        self.assertIn("下载导入模板", c.last_body)
+        csrf = c.csrf
+        c.get("/admin/import/template.xlsx")
+        self.assertEqual(c.last_status, 200)
+        self.assertIn("spreadsheetml", c.last_headers.get("content-type", ""))
+        self.assertTrue(c.last_bytes.startswith(b"PK"))
+        template = c.last_bytes
+        c.post_multipart(
+            "/admin/import",
+            {"_csrf": csrf, "farmer_id": "1", "year": "2026", "state": "draft"},
+            {"file": ("导入模板.xlsx", template)},
+        )
+        self.assertIn("导入结果", c.last_body)
+        self.assertIn("读到", c.last_body)
+        conn = self.env.conn()
+        try:
+            count = conn.execute("SELECT COUNT(*) AS n FROM event WHERE source = 'import'").fetchone()["n"]
+        finally:
+            conn.close()
+        self.assertGreaterEqual(count, 3)
+
 
 class ApiTest(WebTestBase):
     def test_health无需登录(self):

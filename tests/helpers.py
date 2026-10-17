@@ -65,6 +65,8 @@ class Client:
         self.last_status = 0
         self.last_location = ""
         self.last_body = ""
+        self.last_bytes = b""
+        self.last_headers: dict[str, str] = {}
 
     def get(self, path: str, follow: bool = True):
         return self._request("GET", path, follow=follow)
@@ -131,10 +133,13 @@ class Client:
         try:
             conn.request(method, path, body=body, headers=headers)
             resp = conn.getresponse()
-            payload = resp.read().decode("utf-8", "replace")
+            raw = resp.read()
+            payload = raw.decode("utf-8", "replace")
             self.last_status = resp.status
             self.last_location = resp.getheader("Location") or ""
             self.last_body = payload
+            self.last_bytes = raw
+            self.last_headers = {k.lower(): v for k, v in resp.getheaders()}
             for key, value in resp.getheaders():
                 if key.lower() == "set-cookie":
                     pair = value.split(";", 1)[0]

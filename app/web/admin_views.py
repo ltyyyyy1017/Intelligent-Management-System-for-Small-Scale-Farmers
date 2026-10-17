@@ -73,6 +73,17 @@ def register(app) -> None:
             f'<option value="{f["id"]}">{T.esc(_name(req, f))}</option>' for f in farmers
         ) or "<option value=''>先添加农户</option>"
 
+        # 农机作业量：折旧按工作量法计提的依据，没有它折旧恒为 0
+        pack = repo.get_param_pack(conn, village.get("region_code", ""), village.get("param_version", ""))
+        machines = [m["name"] for m in (pack.get("data", {}) or {}).get("machinery", [])]
+        machine_rows = []
+        if farmers:
+            for use in repo.list_machinery_use(conn, int(farmers[0]["id"]), str(today().year)):
+                machine_rows.append([
+                    T.esc(use["name"]), T.esc(use["mu"]),
+                    str(use["prior_depreciation_fen"] // 100), str(use["year_index"]),
+                ])
+
         body = f"""
 <div class="grid2">
 {T.card("本村信息", f'''
@@ -112,6 +123,22 @@ def register(app) -> None:
     <button class="btn primary">添加地块</button>
   </form>
 ''') if farmers else T.card("地块", "<p class='muted'>先添加农户。</p>")}
+
+{T.card("农机作业量（折旧依据）", f'''
+  <p class="muted">自有农机按工作量法计提折旧：不填作业量，折旧就是 0。
+     机型与购置价来自参数包（当前 {len(machines)} 台），换机型请先导入新参数包。</p>
+  <form method="post" action="/admin/machinery">
+    <input type="hidden" name="_csrf" value="{_csrf(req)}"/>
+    <input type="hidden" name="farmer_id" value="{farmers[0]['id'] if farmers else ''}"/>
+    {T.field("年度", "period", value=str(today().year), required=True)}
+    {T.field("农机", "name", options=[(m, m) for m in machines] or [("旋耕机", "旋耕机")])}
+    {T.field("本年作业量（亩）", "mu", required=True, placeholder="例如 12")}
+    {T.field("以前年度已提折旧（元）", "prior", value="0", hint="用于累计折旧封顶，不确定就填 0")}
+    {T.field("这是第几年", "year_index", value="1", type="number")}
+    <button class="btn primary">保存作业量</button>
+  </form>
+  {T.table(["农机", "本年作业量（亩）", "以前已提折旧（元）", "第几年"], machine_rows) if machine_rows else "<p class='muted'>今年还没有登记作业量。</p>"}
+''') if farmers else ""}
 
 <div class="grid2">
 {T.card("参数包", f'''
@@ -155,6 +182,7 @@ def register(app) -> None:
     <input type="hidden" name="_csrf" value="{_csrf(req)}"/>
     <button class="btn primary">立即备份</button>
   </form>
+  <a class="btn" href="/admin/import">批量导入 Excel</a>
   <a class="btn" href="/admin/audit">看审计链</a>
   {T.table(["备份文件", "大小（KB）", "加密", "时间"], [[T.esc(b['name']), str(b['size'] // 1024), "是" if b['encrypted'] else "否", T.esc(b['modified_at'])] for b in backups[:5]]) if backups else "<p class='muted'>还没有备份。</p>"}
 ''')}
@@ -215,6 +243,137 @@ def register(app) -> None:
                 {"area_mu": f"{area:f}", "tenure": req.form.get("tenure") or "owned"},
             )
         return _msg("/admin", "地块已添加")
+
+    # ---------- 农机作业量 ----------
+
+    @app.post("/admin/machinery", roles=("admin",))
+    def add_machinery_use(req: Request):
+        _require_admin(req)
+        fid = req.form.get("farmer_id") or ""
+        period = (req.form.get("period") or "").strip()
+        name = (req.form.get("name") or "").strip()
+        if not fid.isdigit() or not name:
+            return _msg("/admin", "农户和农机都要选", "err")
+        if not (period.isdigit() and len(period) == 4):
+            return _msg("/admin", "年度填四位数字，例如 2026", "err")
+        try:
+            mu = Decimal(req.form.get("mu") or "0")
+            prior_yuan = Decimal(req.form.get("prior") or "0")
+            year_index = int(req.form.get("year_index") or "1")
+            if mu < 0 or prior_yuan < 0 or year_index < 1:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            return _msg("/admin", "作业量、已提折旧、年份都要填非负数字", "err")
+        prior_fen = int((prior_yuan * 100).to_integral_value())
+        with transaction(req.conn):
+            repo.save_machinery_use(
+                req.conn, int(fid), period, name, f"{mu:f}", prior_fen, year_index, now_iso()
+            )
+            from ..audit_svc import AuditService
+
+            AuditService(req.conn).append(
+                req.user["display_name"], "machinery_use.save", f"{fid}/{period}/{name}",
+                {"mu": f"{mu:f}", "prior_fen": prior_fen, "year_index": year_index},
+            )
+        return _msg("/admin", f"已保存 {name} 的 {period} 年作业量")
+
+    # ---------- Excel 批量导入 ----------
+
+    @app.get("/admin/import", roles=("admin", "clerk"))
+    def import_page(req: Request):
+        farmers = repo.list_farmers(req.conn)
+        if req.user["role"] not in ("admin", "clerk"):
+            from ..errors import PermissionDenied
+
+            raise PermissionDenied("没有导入权限")
+        body = f"""
+{T.card("Excel / CSV 批量导入", f'''
+  <p class="muted">适合把现有的台账一次性搬进来。第一行必须是表头：
+     <b>{' | '.join(("日期", "类型", "科目", "金额", "数量", "单位", "备注"))}</b>。
+     日期支持 2026-05-06 / 2026/5/6 / 5月6日；金额填元，可带小数。</p>
+  <p><a class="btn" href="/admin/import/template.xlsx">下载导入模板</a>
+     <span class="hint">（用 Excel 打开填写，别改表头）</span></p>
+  <form method="post" action="/admin/import" enctype="multipart/form-data">
+    <input type="hidden" name="_csrf" value="{_csrf(req)}"/>
+    {T.field("导入给谁", "farmer_id", options=[(str(f["id"]), f"{_name(req, f)}（{f['token']}）") for f in farmers])}
+    {T.field("年度（表里只写月日时用）", "year", value=str(today().year))}
+    {T.field("导入后状态", "state", options=[("draft", "先进草稿，我核对后再确认（推荐）"), ("confirmed", "直接记上")], value="draft")}
+    <div class="field"><label for="f-file">选择文件</label>
+      <input type="file" name="file" id="f-file" accept=".xlsx,.csv" required/></div>
+    <button class="btn primary block">开始导入</button>
+  </form>
+''') if farmers else T.card("批量导入", "<p class='muted'>先添加农户。</p>")}
+"""
+        return _render(req, "批量导入", body, active="admin")
+
+    @app.get("/admin/import/template.xlsx", roles=("admin", "clerk"))
+    def import_template(req: Request):
+        from .. import xlsx
+
+        wb = xlsx.Workbook()
+        ws = wb.add_sheet("导入模板")
+        ws.width(14, 10, 14, 12, 10, 8, 28)
+        ws.append(["日期", "类型", "科目", "金额", "数量", "单位", "备注"], style=3)
+        ws.append(["2026-05-06", "支出", "化肥", 200, 50, "kg", "复合肥，老王农资店"], style=0)
+        ws.append(["2026-09-20", "收入", "主粮销售", 13520, 5200, "kg", "卖稻谷"], style=0)
+        ws.append(["2026-09-25", "收入", "补贴", 300, "", "", "种粮补贴"], style=0)
+        return Response.bytes(
+            wb.to_bytes(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="导入模板.xlsx",
+        )
+
+    @app.post("/admin/import", roles=("admin", "clerk"))
+    def import_submit(req: Request):
+        fid = (req.form.get("farmer_id") or "").strip()
+        upload = req.files.get("file")
+        if not fid.isdigit():
+            return _msg("/admin/import", "请选择农户", "err")
+        if not upload or not upload[1]:
+            return _msg("/admin/import", "没有收到文件", "err")
+        filename, data = upload
+        if len(data) > 10 * 1024 * 1024:
+            return _msg("/admin/import", "文件超过 10 MB，请拆分后导入", "err")
+        from ..importer import import_rows, read_table
+
+        try:
+            rows = read_table(data, filename)
+            summary = import_rows(
+                req.conn, req.user["display_name"], int(fid), rows,
+                state="confirmed" if req.form.get("state") == "confirmed" else "draft",
+                year_hint=(req.form.get("year") or "").strip() or None,
+            )
+        except AppError as exc:
+            return _msg("/admin/import", exc.message, "err")
+
+        from ..audit_svc import AuditService
+
+        with transaction(req.conn):
+            AuditService(req.conn).append(
+                req.user["display_name"], "import.batch", f"farmer:{fid}",
+                {"file": filename, "total": summary.total, "created": summary.created,
+                 "duplicates": summary.duplicates, "errors": len(summary.errors)},
+            )
+        error_rows = "".join(
+            f"<tr><td>{e.get('row')}</td><td>{T.esc(e.get('error'))}</td>"
+            f"<td>{T.esc(' / '.join(e.get('raw', [])))}</td></tr>"
+            for e in summary.errors[:30]
+        )
+        body = f"""
+{T.card("导入结果", f'''
+  <div class="hero-row small">
+    <div class="metric"><span class="k">读到</span><span class="v">{summary.total}</span></div>
+    <div class="metric"><span class="k">导入</span><span class="v">{summary.created}</span></div>
+    <div class="metric"><span class="k">跳过重复</span><span class="v">{summary.duplicates}</span></div>
+    <div class="metric"><span class="k">有问题的行</span><span class="v">{len(summary.errors)}</span></div>
+  </div>
+  <p><a class="btn primary" href="/drafts">去待确认里核对</a>
+     <a class="btn" href="/ledger">看账本</a>
+     <a class="btn" href="/admin/import">再导一份</a></p>
+''')}
+{f'''{T.card("有问题的行（未导入）", T.table(["行号", "原因", "原值"], []) + f"<table class='grid'><tbody>{error_rows}</tbody></table>")}''' if summary.errors else ""}
+"""
+        return _render(req, "导入结果", body, active="admin")
 
     # ---------- 参数包 / 规则包 ----------
 
