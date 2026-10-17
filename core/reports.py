@@ -77,9 +77,9 @@ def render_summary_md(result: dict, snapshot: dict | None = None) -> str:
     ]
     if snapshot:
         lines += [
-            f"- 事件集哈希：`{snapshot['event_set_hash'][:16]}…`",
-            f"- Merkle 根：`{snapshot['merkle_root'][:16]}…`",
-            f"- 签章人：{snapshot['signed_by']}；签章载荷：`{snapshot['signature_payload_sha256'][:16]}…`",
+            f"- 事件集哈希（SM3）：`{snapshot['event_set_hash'][:16]}…`",
+            f"- Merkle 根（SM3）：`{snapshot['merkle_root'][:16]}…`",
+            f"- 签章人：{snapshot['signed_by']}；待签载荷哈希：`{snapshot['signature_payload_hash'][:16]}…`",
         ]
     lines.append("")
     return "\n".join(lines)

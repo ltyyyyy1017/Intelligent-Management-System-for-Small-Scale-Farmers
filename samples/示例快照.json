@@ -1,10 +1,14 @@
 {
   "period": "2026",
-  "event_set_hash": "22ba1020e3372d090c7dc393dabdbc148fe2fffb7234a110ddc3fc7356ef7b8b",
-  "merkle_root": "c03186abf418a5c071cdbe772ac6b013f6a1ee8f3b43c24846733a6d147a54a2",
+  "created_at": "",
+  "digest_alg": "SM3",
+  "event_set_hash": "3da9665c31b0d9bbfee0c1bb3ca4872cfbea1fcdb625113c0359f7cc4aa7591c",
+  "merkle_root": "b4f7508141b0978ab0960fd7400e5b9791906d342f014c220256dadfb93731a8",
+  "event_count": 9,
   "rule_version": "R1-2026.1",
   "param_version": "2026.1",
-  "output_sha256": "f4d347c85f08d4e39ec0cda44c83b00175c38484533dca9547d5eb90e44ebf2e",
+  "region_code": "4401xx",
+  "output_hash": "6e9399cf3ea0cfe0ba254feb405b888327c0375e48b3753e4fa49535115096bc",
   "signed_by": "村委-张三",
-  "signature_payload_sha256": "a53e171e00a1052f13e5cb6acdf189977bef0a4e66ba71fb79438de4c941761f"
+  "signature_payload_hash": "9a2426873d4725bb571c4e301411101f6f22fb98ac10c5f46e83ca7026207c85"
 }

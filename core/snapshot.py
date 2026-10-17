@@ -2,31 +2,42 @@
 
 对应 docs/技术方案V2.md §5.4、§8.4、§8.5。
 
-哈希算法说明：生产实现使用国密 SM3（GB/T 32905）；Python 标准库不含 SM3，
-参考实现用 SHA-256 等价替代，接口与流程完全一致，替换只需改 `_digest`。
+哈希与签名的分工：
+- 摘要用 **SM3**（GB/T 32905），与生产口径一致，不再用 SHA-256 占位；
+- 快照本身只产出**待签字节**（`signing_bytes`），SM2 私钥运算不在这里做——
+  私钥属于部署环境（UKey/加密密钥文件），核算内核不接触密钥。
+
+重放校验是这套方案的技术支点：同一份事件集 + 同一版本规则，重算必须**逐字节**
+一致。不一致就意味着"数据被改"或"代码被改"，两者都必须拒绝出具报表。
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from decimal import Decimal
 from typing import Iterable, Sequence
 
-from .models import Event, MachineryUse, Params, Plot, RulePack
 from .costing import compute
+from .crypto.sm3 import sm3, sm3_hex
+from .models import Event, MachineryUse, Params, Plot, RulePack
 
 __all__ = [
+    "DIGEST_ALG",
     "canonical_events",
     "event_set_hash",
     "merkle_root",
+    "merkle_leaves",
     "make_snapshot",
+    "signing_bytes",
+    "snapshot_digest",
+    "attach_signature",
     "replay",
 ]
 
+DIGEST_ALG = "SM3"
+
 
 def _digest(data: bytes) -> str:
-    """SM3 占位实现：生产替换为 sm3(data).hexdigest()。"""
-    return hashlib.sha256(data).hexdigest()
+    return sm3_hex(data)
 
 
 def canonical_events(events: Iterable[Event]) -> bytes:
@@ -43,6 +54,13 @@ def event_set_hash(events: Iterable[Event]) -> str:
     return _digest(canonical_events(events))
 
 
+def merkle_leaves(events: Iterable[Event]) -> list[str]:
+    return [
+        _digest(e.canonical().encode("utf-8"))
+        for e in sorted(events, key=lambda e: (e.date, e.id))
+    ]
+
+
 def merkle_root(leaves: Sequence[str]) -> str:
     """事件批次 Merkle 根。空集返回全零哈希；奇数节点复制自身。"""
     if not leaves:
@@ -52,14 +70,10 @@ def merkle_root(leaves: Sequence[str]) -> str:
         if len(level) % 2 == 1:
             level.append(level[-1])
         level = [
-            hashlib.sha256(level[i] + level[i + 1]).digest()  # 与 _digest 同构
+            sm3(level[i] + level[i + 1])
             for i in range(0, len(level), 2)
         ]
     return level[0].hex()
-
-
-def _event_leaves(events: Iterable[Event]) -> list[str]:
-    return [_digest(e.canonical().encode("utf-8")) for e in sorted(events, key=lambda e: (e.date, e.id))]
 
 
 def _json_default(obj):
@@ -73,27 +87,62 @@ def make_snapshot(
     events: Sequence[Event],
     signed_by: str,
     period: str,
+    created_at: str = "",
+    device_id: str = "",
+    extra: dict | None = None,
 ) -> dict:
-    """生成不可变快照：输入哈希 + 版本 + 完整输出 + Merkle 根 + 签章载荷。
+    """生成不可变快照：输入哈希 + 版本 + 输出摘要 + Merkle 根 + 待签载荷。
 
-    签章本身（SM2 私钥运算）不在参考实现内——它依赖 UKey/密钥文件，属于部署环节。
-    这里产出的是"待签章载荷"，字段与 §8.4 一致。
+    `created_at` 由调用方传入（不读时钟），保证同输入同输出；
+    真实业务里它是"出表时间"，重放时保留原值、不参与重算比对。
+    `device_id` 在签名**之前**写入载荷，签章因此同时绑定人与设备。
     """
     payload = {
         "period": period,
+        "created_at": created_at,
+        "digest_alg": DIGEST_ALG,
         "event_set_hash": event_set_hash(events),
-        "merkle_root": merkle_root(_event_leaves(events)),
+        "merkle_root": merkle_root(merkle_leaves(events)),
+        "event_count": len(events),
         "rule_version": result["meta"]["rule_version"],
         "param_version": result["meta"]["param_version"],
-        "output_sha256": hashlib.sha256(
+        "region_code": result["meta"]["region_code"],
+        "output_hash": _digest(
             json.dumps(result, sort_keys=True, ensure_ascii=False, default=_json_default).encode("utf-8")
-        ).hexdigest(),
+        ),
         "signed_by": signed_by,
     }
-    payload["signature_payload_sha256"] = _digest(
+    if device_id:
+        payload["device_id"] = device_id
+    if extra:
+        payload["extra"] = extra
+    payload["signature_payload_hash"] = _digest(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     )
     return payload
+
+
+def signing_bytes(snapshot: dict) -> bytes:
+    """待签字节：不含 signature 字段的规范化 JSON。
+
+    银行侧要做的是"用村委公钥验证 signature 覆盖了这些字节"，因此这里的序列化
+    规则必须稳定、可被第三方独立复现（sort_keys + UTF-8 + 无多余空白）。
+    """
+    body = {k: v for k, v in snapshot.items() if k not in ("signature", "public_key")}
+    return json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def snapshot_digest(snapshot: dict) -> str:
+    """待签字节的 SM3 摘要，供纸质报表二维码/脚注打印。"""
+    return _digest(signing_bytes(snapshot))
+
+
+def attach_signature(snapshot: dict, signature_hex: str, public_key_hex: str) -> dict:
+    """把 SM2 签名与公钥挂到快照上，返回新 dict（不修改入参）。"""
+    signed = dict(snapshot)
+    signed["signature"] = signature_hex
+    signed["public_key"] = public_key_hex
+    return signed
 
 
 def replay(
@@ -113,7 +162,7 @@ def replay(
     recomputed = compute(events, plots, params, rule, machinery_use)
     checks = {
         "event_set_hash": event_set_hash(events) == snapshot["event_set_hash"],
-        "merkle_root": merkle_root(_event_leaves(events)) == snapshot["merkle_root"],
+        "merkle_root": merkle_root(merkle_leaves(events)) == snapshot["merkle_root"],
         "output": recomputed == result,
     }
     diff: list[str] = []
