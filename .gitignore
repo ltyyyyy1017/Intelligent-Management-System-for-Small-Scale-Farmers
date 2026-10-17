@@ -10,6 +10,11 @@ local/
 *.pem
 *.env
 
+# 原始申报材料（含手机号、邮箱、学号等个人信息）与文本提取，永不入库
+references/
+# 一次性脚本（PDF/DOCX 文本提取、推送辅助）
+_scratch/
+
 # 编辑器
 .vscode/
 .idea/
